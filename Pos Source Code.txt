@@ -1,0 +1,149 @@
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Data;
+using System.Data.SqlClient;
+using System.Drawing;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+using System.Windows.Forms;
+
+namespace PointofSale
+{
+    public partial class Form1 : Form
+    {
+        SqlConnection con = new SqlConnection(@"Data Source=DESKTOP-DASLLN7;Initial Catalog=SupermarketPOS;TrustServerCertificate=True;Integrated Security=True;");
+
+        DataTable cartTable = new DataTable();
+        decimal totalBill = 0;
+        public Form1()
+        {
+            InitializeComponent();
+            cartTable.Columns.Add("ProductID");
+            cartTable.Columns.Add("ProductName");
+            cartTable.Columns.Add("Price", typeof(decimal));
+            cartTable.Columns.Add("Quantity", typeof(int));
+            cartTable.Columns.Add("Total", typeof(decimal));
+            dgvCart.DataSource = cartTable;
+        }
+
+        private void btnAddtoCart_Click(object sender, EventArgs e)
+        {
+            MessageBox.Show("Add to Cart button clicked!"); // Debugging step
+
+            if (string.IsNullOrWhiteSpace(txtProductID.Text) || string.IsNullOrWhiteSpace(txtQuantity.Text))
+            {
+                MessageBox.Show("Please enter Product ID and Quantity.", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+            try
+            {
+                int productId = Convert.ToInt32(txtProductID.Text);
+                int quantity = Convert.ToInt32(txtQuantity.Text);
+
+                string query = "SELECT ProductName, Price FROM Products WHERE ProductID=@ProductID";
+                SqlCommand cmd = new SqlCommand(query, con);
+                cmd.Parameters.AddWithValue("@ProductID", productId);
+
+                con.Open();
+                SqlDataReader reader = cmd.ExecuteReader();
+                if (reader.Read())
+                {
+                    string productName = reader["ProductName"].ToString();
+                    decimal price = Convert.ToDecimal(reader["Price"]);
+                    decimal total = price * quantity;
+
+                    cartTable.Rows.Add(productId, productName, price, quantity, total);
+                    totalBill += total;
+                    lblTotal.Text = "Total: " + totalBill.ToString("C");
+
+                    MessageBox.Show("Product added successfully!", "Success", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                }
+                else
+                {
+                    MessageBox.Show("Product ID not found in database.", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+                reader.Close();
+                con.Close();
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Error: " + ex.Message, "Exception", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private void btnCheckout_Click(object sender, EventArgs e)
+        {
+            if (cartTable.Rows.Count == 0)
+            {
+                MessageBox.Show("Cart is empty. Please add items before checkout.", "Warning", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            string connectionString = "Server=DESKTOP-DASLLN7;Database=SupermarketPOS;Integrated Security=True;";
+            using (SqlConnection conn = new SqlConnection(connectionString))
+            {
+                conn.Open();
+                SqlTransaction transaction = conn.BeginTransaction();
+
+                try
+                {
+                    // 1️⃣ Insert Sale into Sales Table
+                    string insertSaleQuery = "INSERT INTO Sales (TotalAmount, SaleDate, PaymentMethod) VALUES (@Total, GETDATE(), @PaymentMethod); SELECT SCOPE_IDENTITY();";
+                    SqlCommand cmdSale = new SqlCommand(insertSaleQuery, conn, transaction);
+                    cmdSale.Parameters.AddWithValue("@Total", totalBill);
+                    cmdSale.Parameters.AddWithValue("@PaymentMethod", cmbPaymentMethod.SelectedItem.ToString());
+                    int saleID = Convert.ToInt32(cmdSale.ExecuteScalar());
+
+                    // 2️⃣ Insert Each Product into SalesDetails and Update Stock
+                    foreach (DataRow row in cartTable.Rows)
+                    {
+                        int productID = Convert.ToInt32(row["ProductID"]);
+                        int quantity = Convert.ToInt32(row["Quantity"]);
+                        decimal price = Convert.ToDecimal(row["Price"]);
+
+                        // Insert into SalesDetails Table
+                        string insertDetailQuery = "INSERT INTO SalesDetails (SaleID, ProductID, Quantity, Price) VALUES (@SaleID, @ProductID, @Quantity, @Price);";
+                        SqlCommand cmdDetail = new SqlCommand(insertDetailQuery, conn, transaction);
+                        cmdDetail.Parameters.AddWithValue("@SaleID", saleID);
+                        cmdDetail.Parameters.AddWithValue("@ProductID", productID);
+                        cmdDetail.Parameters.AddWithValue("@Quantity", quantity);
+                        cmdDetail.Parameters.AddWithValue("@Price", price);
+                        cmdDetail.ExecuteNonQuery();
+
+                        // 🔻 Reduce Stock Quantity
+                        string updateStockQuery = "UPDATE Products SET StockQuantity = StockQuantity - @Quantity WHERE ProductID = @ProductID AND StockQuantity >= @Quantity;";
+                        SqlCommand cmdUpdateStock = new SqlCommand(updateStockQuery, conn, transaction);
+                        cmdUpdateStock.Parameters.AddWithValue("@ProductID", productID);
+                        cmdUpdateStock.Parameters.AddWithValue("@Quantity", quantity);
+
+                        int rowsAffected = cmdUpdateStock.ExecuteNonQuery();
+                        if (rowsAffected == 0)
+                        {
+                            // If stock is insufficient, rollback
+                            transaction.Rollback();
+                            MessageBox.Show($"Not enough stock for Product ID: {productID}", "Stock Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                            return;
+                        }
+                    }
+
+                    // Commit transaction
+                    transaction.Commit();
+                    MessageBox.Show("Checkout successful!", "Success", MessageBoxButtons.OK, MessageBoxIcon.Information);
+
+                    // 🛒 Clear the cart after checkout
+                    cartTable.Clear();
+                    lblTotal.Text = "Total: $0.00";
+                    totalBill = 0;
+                }
+                catch (Exception ex)
+                {
+                    transaction.Rollback();
+                    MessageBox.Show("Error during checkout: " + ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+            }
+        }
+    }
+}
